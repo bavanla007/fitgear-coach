@@ -1,7 +1,8 @@
+import asyncio
 import base64
-import os
 import uuid
 from google import genai
+from google.genai import types
 from google.cloud import storage
 from google.adk.tools import ToolContext
 
@@ -22,44 +23,51 @@ async def generate_gear_video(
     Returns:
         Public GCS https URL pointing to the generated video file.
     """
-    client = genai.Client(
-        vertexai=True,
-        project=PROJECT_ID,
-        location="global",
-    )
+    try:
+        client = genai.Client(
+            vertexai=True,
+            project=PROJECT_ID,
+            location="global",
+        )
 
-    interaction = client.interactions.create(
-        model="gemini-omni-flash-preview",
-        input=f"Generate a short video showing: {prompt}",
-        response_format={"type": "VIDEO"},
-    )
+        interaction = client.interactions.create(
+            model="gemini-omni-flash-preview",
+            input=f"Generate a short video showing: {prompt}",
+            response_format={"type": "VIDEO"},
+        )
 
-    video_bytes = None
-    if hasattr(interaction, "output_video") and interaction.output_video:
-        out = interaction.output_video
-        if hasattr(out, "data") and out.data:
-            video_bytes = out.data
-        elif isinstance(out, dict) and out.get("data"):
-            video_bytes = out["data"]
+        video_bytes = None
+        if hasattr(interaction, "output_video") and interaction.output_video:
+            out = interaction.output_video
+            if hasattr(out, "data") and out.data:
+                video_bytes = out.data
+            elif isinstance(out, dict) and out.get("data"):
+                video_bytes = out["data"]
 
-    if not video_bytes:
-        raise ValueError("Failed to generate video bytes from gemini-omni-flash-preview.")
+        if not video_bytes:
+            return "Error: Failed to generate video bytes from gemini-omni-flash-preview."
 
-    if isinstance(video_bytes, str):
-        try:
-            video_bytes = base64.b64decode(video_bytes)
-        except Exception:
-            video_bytes = video_bytes.encode("utf-8")
+        if isinstance(video_bytes, str):
+            try:
+                video_bytes = base64.b64decode(video_bytes)
+            except Exception:
+                video_bytes = video_bytes.encode("utf-8")
 
-    # 1. Save artifact to Playground's Artifacts panel
-    if tool_context:
-        await tool_context.save_artifact("gear_video.mp4", video_bytes, mime_type="video/mp4")
+        filename = f"gear_video_{uuid.uuid4().hex[:8]}.mp4"
 
-    # 2. Upload video bytes to public Cloud Storage bucket
-    filename = f"gear_video_{uuid.uuid4().hex[:8]}.mp4"
-    storage_client = storage.Client(project=PROJECT_ID)
-    bucket = storage_client.bucket(BUCKET_NAME)
-    blob = bucket.blob(filename)
-    blob.upload_from_string(video_bytes, content_type="video/mp4")
+        # 1. Save artifact to Playground's Artifacts panel using types.Part
+        if tool_context:
+            artifact_part = types.Part.from_bytes(data=video_bytes, mime_type="video/mp4")
+            res = tool_context.save_artifact(filename=filename, artifact=artifact_part)
+            if asyncio.iscoroutine(res):
+                await res
 
-    return f"https://storage.googleapis.com/{BUCKET_NAME}/{filename}"
+        # 2. Upload video bytes to public Cloud Storage bucket
+        storage_client = storage.Client(project=PROJECT_ID)
+        bucket = storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(filename)
+        blob.upload_from_string(video_bytes, content_type="video/mp4")
+
+        return f"https://storage.googleapis.com/{BUCKET_NAME}/{filename}"
+    except Exception as e:
+        return f"Video generation failed: {str(e)}"
